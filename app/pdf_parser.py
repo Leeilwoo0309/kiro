@@ -17,7 +17,7 @@ from typing import Optional
 
 import pdfplumber
 
-from app.models import CSV_COLUMNS, ParseResult, PaymentType, Transaction
+from app.models import CSV_COLUMNS, Direction, ParseResult, PaymentType, Transaction
 
 # 20 MB
 MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024
@@ -81,16 +81,45 @@ def _parse_date(raw: str) -> Optional[date]:
     return None
 
 
-def _parse_amount(raw: str) -> Optional[float]:
-    """금액 문자열(쉼표 포함)을 float으로 변환합니다."""
+def _parse_time(raw: str) -> Optional[str]:
+    """'2026.10.23 12:18:47' 같은 거래일시에서 HH:MM을 뽑는다. 새벽 결제 찾기에 쓴다."""
+    m = re.search(r"\b(\d{1,2}):(\d{2})(?::\d{2})?\b", raw or "")
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        return None
+    return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+
+def _parse_amount(raw: str) -> Optional[int]:
+    """금액 문자열(쉼표 포함)을 원화 정수로 변환합니다 (R3.5-3).
+
+    부호는 버리고 절대값을 반환합니다. 부호의 의미는 _detect_direction이 판단합니다.
+    """
     raw = raw.strip().replace(",", "").replace("원", "").replace(" ", "")
-    # 음수(-)는 절대값으로 처리 (지출은 항상 양수로 저장)
     raw = raw.lstrip("-")
     try:
-        value = float(raw)
+        value = int(round(float(raw)))
         return value if value > 0 else None
     except ValueError:
         return None
+
+
+# 입금(돈이 들어옴)으로 판단하는 키워드. 카드 명세서의 취소·환불도 돈이 돌아오는 방향이다.
+_IN_KEYWORDS = ("입금", "환불", "취소", "맡기신")
+
+
+def _detect_direction(payment_text: str, amount_text: str) -> Direction:
+    """입출금 방향을 판단합니다 (R3.5-1).
+
+    1. 거래구분 텍스트에 입금·환불·취소가 있으면 IN
+    2. 금액이 음수로 표기되어 있으면 IN (카드 명세서의 취소·환불 표기 관례)
+    3. 그 외는 OUT
+    """
+    text = (payment_text or "").lower()
+    if any(k in text for k in _IN_KEYWORDS):
+        return Direction.IN
+    if (amount_text or "").strip().startswith("-"):
+        return Direction.IN
+    return Direction.OUT
 
 
 def _normalize_payment_type(raw: str) -> Optional[PaymentType]:
@@ -118,7 +147,8 @@ def _extract_transactions_from_table(
     # 헤더에서 컬럼 인덱스 탐색 (유연한 매핑)
     col_map = _map_columns(header)
     if col_map is None:
-        return [], len(rows)
+        # 계좌 정보 표처럼 거래 표가 아닌 표는 건너뛴 행으로 세지 않는다
+        return [], 0
 
     for row in rows:
         if not row or all(cell is None or str(cell).strip() == "" for cell in row):
@@ -130,15 +160,34 @@ def _extract_transactions_from_table(
             raw_amount = _get_cell(row, col_map.get("amount"))
             raw_merchant = _get_cell(row, col_map.get("merchant_name"))
             raw_payment = _get_cell(row, col_map.get("payment_type"))
+            raw_in = _get_cell(row, col_map.get("in_amount"))
+            raw_out = _get_cell(row, col_map.get("out_amount"))
+            has_in_out = "in_amount" in col_map
+
+            # 입금액·출금액 열이 따로 있는 은행 명세서: 값이 있는 열이 방향을 정한다 (R3.5-1)
+            in_amt = _parse_amount(raw_in) if raw_in else None
+            out_amt = _parse_amount(raw_out) if raw_out else None
+            if in_amt:
+                parsed_amount, direction = in_amt, Direction.IN
+            elif out_amt:
+                parsed_amount, direction = out_amt, Direction.OUT
+            else:
+                parsed_amount = _parse_amount(raw_amount) if raw_amount else None
+                direction = _detect_direction(raw_payment or "", raw_amount or "")
+
+            parsed_payment = _normalize_payment_type(raw_payment) if raw_payment else None
+            if parsed_payment is None and has_in_out:
+                # 은행 계좌 명세서에서 체크카드가 아닌 거래(전자금융, 자동이체 등)는 계좌 거래로 본다
+                parsed_payment = PaymentType.TRANSFER
+            if raw_merchant:
+                raw_merchant = " ".join(raw_merchant.split())  # 셀 안 줄바꿈 제거
 
             # 필수 필드 누락 체크 (Requirement 7 AC #7)
-            if not all([raw_date, raw_amount, raw_merchant, raw_payment]):
+            if not raw_date or not raw_merchant:
                 skipped += 1
                 continue
 
             parsed_date = _parse_date(raw_date)
-            parsed_amount = _parse_amount(raw_amount)
-            parsed_payment = _normalize_payment_type(raw_payment)
 
             if parsed_date is None or parsed_amount is None or parsed_payment is None:
                 skipped += 1
@@ -150,6 +199,8 @@ def _extract_transactions_from_table(
                     amount=parsed_amount,
                     merchant_name=raw_merchant.strip(),
                     payment_type=parsed_payment,
+                    direction=direction,
+                    time=_parse_time(_get_cell(row, col_map.get("time")) or raw_date),
                 )
             )
         except Exception:
@@ -173,7 +224,7 @@ def _map_columns(header: list[str]) -> Optional[dict[str, int]]:
     한글/영어 헤더 모두 지원합니다.
     """
     mapping = {}
-    header_lower = [str(h).lower().replace(" ", "") if h else "" for h in header]
+    header_lower = [re.sub(r"\s+", "", str(h).lower()) if h else "" for h in header]
 
     # date 컬럼
     date_keys = ["date", "날짜", "거래일", "거래일자", "이용일", "결제일"]
@@ -183,6 +234,11 @@ def _map_columns(header: list[str]) -> Optional[dict[str, int]]:
                 mapping["date"] = i
                 break
         if "date" in mapping:
+            break
+
+    for i, h in enumerate(header_lower):
+        if "시간" in h or h == "time":
+            mapping["time"] = i
             break
 
     # amount 컬럼
@@ -196,7 +252,10 @@ def _map_columns(header: list[str]) -> Optional[dict[str, int]]:
             break
 
     # merchant_name 컬럼
-    merchant_keys = ["merchant", "상호", "가맹점", "거래처", "내용", "적요", "이용가맹점"]
+    # 은행 명세서(예: KB국민은행)는 '적요'에 거래 수단(체크카드, 전자금융)이 들어가고
+    # 실제 거래처는 '보낸분/받는분'에 있으므로 그 열을 먼저 찾는다.
+    merchant_keys = ["merchant", "보낸분/받는분", "받는분", "보낸분", "상호", "가맹점", "거래처",
+                     "내용", "적요", "이용가맹점"]
     for key in merchant_keys:
         for i, h in enumerate(header_lower):
             if key in h:
@@ -205,36 +264,59 @@ def _map_columns(header: list[str]) -> Optional[dict[str, int]]:
         if "merchant_name" in mapping:
             break
 
-    # payment_type 컬럼
-    payment_keys = ["payment", "구분", "거래구분", "유형", "종류", "type"]
+    # payment_type 컬럼. 거래처 열로 쓰지 않은 '적요'는 거래 수단 열로 쓴다.
+    payment_keys = ["payment", "구분", "거래구분", "유형", "종류", "type", "적요"]
     for key in payment_keys:
         for i, h in enumerate(header_lower):
-            if key in h:
+            if key in h and i != mapping.get("merchant_name"):
                 mapping["payment_type"] = i
                 break
         if "payment_type" in mapping:
             break
 
-    # 4개 컬럼이 모두 매핑됐는지 확인
-    required = {"date", "amount", "merchant_name", "payment_type"}
+    # 입금액·출금액 분리 열 (은행 명세서). 선택 항목이며 방향 판단에 사용 (R3.5-1)
+    in_keys = ["입금액", "입금", "맡기신"]
+    out_keys = ["출금액", "출금", "찾으신"]
+    for target, keys in (("in_amount", in_keys), ("out_amount", out_keys)):
+        for key in keys:
+            for i, h in enumerate(header_lower):
+                if key in h:
+                    mapping[target] = i
+                    break
+            if target in mapping:
+                break
+    # 입금·출금 열이 둘 다 있어야 분리 형식으로 인정한다
+    if not {"in_amount", "out_amount"}.issubset(mapping.keys()):
+        mapping.pop("in_amount", None)
+        mapping.pop("out_amount", None)
+
+    # 필수 컬럼 확인. 입금·출금 분리 열이 있으면 거래구분 열은 없어도 된다.
+    required = {"date", "merchant_name"}
+    if "in_amount" not in mapping:
+        required.update(("amount", "payment_type"))
     if not required.issubset(mapping.keys()):
         return None
 
     return mapping
 
 
-def parse_pdf(file_bytes: bytes) -> ParseResult:
+def _is_password_error(e: Exception) -> bool:
+    return "password" in type(e).__name__.lower()
+
+
+def parse_pdf(file_bytes: bytes, password: Optional[str] = None) -> ParseResult:
     """
     PDF 바이트 데이터를 파싱하여 거래 내역을 추출합니다.
 
     Args:
         file_bytes: 업로드된 PDF 파일의 바이트 데이터
+        password: 암호가 걸린 PDF의 비밀번호 (은행 거래내역 PDF 등). 저장·기록하지 않는다.
 
     Returns:
         ParseResult: 추출된 Transaction 목록과 스킵된 행 수
 
     Raises:
-        PDFParseError: 파일 크기 초과, 스캔 PDF, 파싱 실패 등
+        PDFParseError: 파일 크기 초과, 스캔 PDF, 비밀번호 오류, 파싱 실패 등
     """
     # 파일 크기 검증 (Requirement 7 AC #5)
     if len(file_bytes) > MAX_PDF_SIZE_BYTES:
@@ -244,11 +326,25 @@ def parse_pdf(file_bytes: bytes) -> ParseResult:
         )
 
     try:
-        pdf = pdfplumber.open(io.BytesIO(file_bytes))
+        pdf = pdfplumber.open(io.BytesIO(file_bytes), password=password or "")
     except Exception as e:
-        raise PDFParseError(f"PDF 파일을 열 수 없습니다. 올바른 PDF 형식인지 확인해 주세요. ({e})")
+        if _is_password_error(e):
+            raise PDFParseError("PDF 비밀번호가 필요하거나 틀렸습니다. 비밀번호를 확인해 주세요.")
+        raise PDFParseError(f"PDF 파일을 열 수 없습니다. 올바른 PDF 형식인지 확인해 주세요. ({type(e).__name__})")
 
-    with pdf:
+    try:
+        with pdf:
+            return _parse_opened_pdf(pdf)
+    except PDFParseError:
+        raise
+    except Exception as e:
+        if _is_password_error(e):
+            raise PDFParseError("PDF 비밀번호가 필요하거나 틀렸습니다. 비밀번호를 확인해 주세요.")
+        raise PDFParseError(f"PDF를 읽는 중 오류가 났습니다. ({type(e).__name__})")
+
+
+def _parse_opened_pdf(pdf) -> ParseResult:
+        """열린 PDF에서 표 → 텍스트 순서로 거래를 추출한다."""
         # 스캔 이미지 PDF 감지 (Requirement 7 AC #4)
         if _detect_scanned_pdf(pdf):
             raise PDFParseError(
@@ -314,7 +410,7 @@ def _parse_text_fallback(text: str) -> tuple[list[Transaction], int]:
         if not line:
             continue
 
-        match = date_start_pattern.search(line)
+        match = date_start_pattern.match(line)
         if not match:
             continue
 
@@ -351,6 +447,7 @@ def _parse_text_fallback(text: str) -> tuple[list[Transaction], int]:
                 amount=parsed_amount,
                 merchant_name=merchant,
                 payment_type=parsed_payment,
+                direction=_detect_direction(line, ""),
             )
         )
 

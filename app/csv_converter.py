@@ -2,7 +2,7 @@
 CSV 변환기
 
 전처리가 완료된 Transaction 목록을 내부 CSV 형식(문자열)으로 직렬화합니다.
-Requirement 7 AC #3: 컬럼 순서 = date, amount, merchant_name, payment_type
+컬럼 순서 = date, amount, merchant_name, payment_type, direction (requirements R3.2)
 """
 
 from __future__ import annotations

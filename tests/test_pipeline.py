@@ -156,12 +156,14 @@ class TestPreprocessor:
         assert len(result.transactions) == 0
         assert result.skipped_rows == 1
 
-    def test_removes_duplicate(self):
+    def test_marks_duplicate_without_removing(self):
+        # requirements R3.5-2: 정상 반복 결제가 사라지지 않도록 삭제하지 않고 후보로만 표시
         txn1 = _make_txn()
         txn2 = _make_txn()  # 동일한 거래
         result = preprocess(ParseResult(transactions=[txn1, txn2]))
-        assert len(result.transactions) == 1
-        assert result.skipped_rows == 1
+        assert len(result.transactions) == 2
+        assert result.duplicate_indices == [1]
+        assert result.skipped_rows == 0
 
     def test_normalizes_merchant_name(self):
         txn = _make_txn(merchant="  스타벅스!!!  ")
@@ -226,3 +228,38 @@ class TestParsePdf:
         with patch("app.pdf_parser.pdfplumber.open", return_value=mock_pdf):
             with pytest.raises(PDFParseError, match="스캔"):
                 parse_pdf(b"%PDF-fake")
+
+
+class TestBankSeparateAmounts:
+    def test_shinhan_headers_compact_dates_and_separate_time(self):
+        from app.pdf_parser import _extract_transactions_from_table
+        header = ['거래일자', '거래시간', '적요', '출금(원)', '입금(원)', '내용', '잔액(원)', '거래점']
+        rows = [
+            ['20261107', '01:44:57', '체크카드', '15,600', '0', '테스트 상점', '11,272', '지점'],
+            ['20261106', '12:20:11', '타행인터넷\n뱅킹', '0', '8,200', '테스트 입금', '26,872', '지점'],
+        ]
+        txs, skipped = _extract_transactions_from_table(rows, header)
+        assert skipped == 0
+        assert len(txs) == 2
+        assert txs[0].date.isoformat() == '2026-11-07'
+        assert txs[0].time == '01:44'
+        assert txs[0].amount == 15600
+        assert txs[0].direction.value == 'out'
+        assert txs[0].payment_type.value == 'debit'
+        assert txs[0].merchant_name == '테스트 상점'
+        assert txs[1].amount == 8200
+        assert txs[1].direction.value == 'in'
+        assert txs[1].payment_type.value == 'transfer'
+        assert txs[1].time == '12:20'
+
+    def test_query_period_is_not_a_transaction(self):
+        from app.pdf_parser import _parse_text_fallback
+        txs, skipped = _parse_text_fallback('조회기간 2026.08.08~2026.11.08 대출한도')
+        assert txs == []
+
+    def test_header_line_breaks_and_invalid_time(self):
+        from app.pdf_parser import _map_columns, _parse_time
+        mapping = _map_columns(['거래\n일자', '출금\n(원)', '입금\n(원)', '내용'])
+        assert mapping['out_amount'] == 1
+        assert mapping['in_amount'] == 2
+        assert _parse_time('12:99') is None

@@ -5,7 +5,8 @@ PDF_Parser 또는 CSV_Parser가 반환한 Transaction 목록에 대해
 분석 전 필요한 정제 작업을 수행합니다.
 
 수행 작업:
-1. 중복 거래 제거  - 같은 날짜+금액+상호명 조합
+1. 중복 후보 표시  - 같은 날짜+금액+상호명+방향 조합. 정상 반복 결제가 사라지지 않도록
+                     삭제하지 않고 duplicate_indices에 표시만 한다 (R3.5-2)
 2. 금액 이상값 필터링  - 0원 이하, 현실적으로 불가능한 초고액
 3. 상호명 정규화  - 앞뒤 공백 제거, 특수문자 정리, 빈 값 → '알 수 없음'
 4. 날짜 범위 검증  - 미래 날짜 제거
@@ -19,8 +20,8 @@ from datetime import date
 
 from app.models import ParseResult, Transaction
 
-# 1회 거래 최대 금액 (10억 원 초과는 입력 오류로 간주)
-MAX_AMOUNT = 1_000_000_000.0
+# 1회 거래 최대 금액. 금액 입력 상한(R2.2)과 같게 999,999,999원
+MAX_AMOUNT = 999_999_999
 
 # 상호명 정제용 패턴: 괄호 안 내용, 연속 공백, 불필요한 특수문자 제거
 _CLEAN_PATTERN = re.compile(r"[^\w가-힣\s\-&.]")
@@ -42,9 +43,9 @@ def _normalize_merchant(raw: str) -> str:
 
 def _is_duplicate(seen: set[tuple], txn: Transaction) -> bool:
     """
-    같은 날짜 + 금액 + 상호명 조합의 중복 여부를 확인합니다.
+    같은 날짜 + 금액 + 상호명 + 방향 조합의 중복 여부를 확인합니다.
     """
-    key = (txn.date, txn.amount, txn.merchant_name)
+    key = (txn.date, txn.time, txn.amount, txn.merchant_name, txn.direction)
     if key in seen:
         return True
     seen.add(key)
@@ -82,7 +83,7 @@ def preprocess(result: ParseResult) -> ParseResult:
             additional_skipped += 1
             warnings.append(
                 f"[금액 이상값] {txn.date} {txn.merchant_name}: "
-                f"금액이 10억 원을 초과합니다 ({txn.amount:,.0f}원). 스킵합니다."
+                f"금액이 999,999,999원을 초과합니다 ({txn.amount:,.0f}원). 스킵합니다."
             )
             continue
 
@@ -99,27 +100,31 @@ def preprocess(result: ParseResult) -> ParseResult:
         normalized_merchant = _normalize_merchant(txn.merchant_name)
         normalized_txn = Transaction(
             date=txn.date,
-            amount=txn.amount,
+            amount=int(txn.amount),
             merchant_name=normalized_merchant,
             payment_type=txn.payment_type,
+            direction=txn.direction,
+            time=txn.time,
         )
-
-        # 4. 중복 제거
-        if _is_duplicate(seen, normalized_txn):
-            additional_skipped += 1
-            warnings.append(
-                f"[중복] {normalized_txn.date} {normalized_txn.merchant_name} "
-                f"{normalized_txn.amount:,.0f}원: 중복 거래로 스킵합니다."
-            )
-            continue
 
         cleaned.append(normalized_txn)
 
-    # 5. 날짜 오름차순 정렬
-    cleaned.sort(key=lambda t: t.date)
+    # 4. 날짜 오름차순 정렬 (안정 정렬이라 같은 날짜는 원래 순서 유지)
+    cleaned.sort(key=lambda t: (t.date, t.time or ""))
+
+    # 5. 중복 후보 표시. 삭제하지 않는다 (R3.5-2)
+    duplicate_indices: list[int] = []
+    for i, txn in enumerate(cleaned):
+        if _is_duplicate(seen, txn):
+            duplicate_indices.append(i)
+            warnings.append(
+                f"[중복 후보] {txn.date} {txn.merchant_name} "
+                f"{txn.amount:,.0f}원: 같은 거래가 이미 있습니다. 가져오기 전에 확인하세요."
+            )
 
     return ParseResult(
         transactions=cleaned,
         skipped_rows=result.skipped_rows + additional_skipped,
         warnings=warnings,
+        duplicate_indices=duplicate_indices,
     )

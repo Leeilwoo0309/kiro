@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>텅장감사 · 지출 점검</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand">
+        <div class="logo" aria-hidden="true"><img class="icon" src="/static/icons/scale.svg" width="20" height="20" alt=""></div>
+        <div>
+          <strong>텅장감사</strong>
+          <span>기록하고, 확인하고, 결정하기</span>
+        </div>
+      </div>
+      <nav class="tabs" aria-label="주요 메뉴">
+        <button data-tab="dashboard" class="active"><span class="ico" aria-hidden="true"><img class="icon" src="/static/icons/layout-dashboard.svg" width="20" height="20" alt=""></span><span>가계부</span></button>
+        <button data-tab="hearing"><span class="ico" aria-hidden="true"><img class="icon" src="/static/icons/scale.svg" width="20" height="20" alt=""></span><span>청문회</span></button>
+        <button data-tab="import"><span class="ico" aria-hidden="true"><img class="icon" src="/static/icons/upload.svg" width="20" height="20" alt=""></span><span>가져오기</span></button>
+        <button data-tab="settings"><span class="ico" aria-hidden="true"><img class="icon" src="/static/icons/settings.svg" width="20" height="20" alt=""></span><span>설정</span></button>
+      </nav>
+      <p class="side-foot">거래 기록은 이 컴퓨터에 저장됩니다. 서비스 연결 시 분류·대화에 필요한 정보가 전송됩니다.</p>
+    </aside>
+
+    <div class="content">
+      <header class="top">
+        <h1 id="page-title">가계부</h1>
+        <div class="toggles">
+          <label class="switch"><input type="checkbox" id="toggle-hearing"><span class="slider"></span> 국감 모드</label>
+          <label class="switch"><input type="checkbox" id="toggle-present"><span class="slider"></span> 발표 모드</label>
+          <button id="ai-status" class="badge" type="button" title="분석 서비스 연결 설정">연결 설정</button>
+        </div>
+      </header>
+
+      <div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+      <main>
+        <section id="tab-dashboard" class="tab active"></section>
+        <section id="tab-hearing" class="tab"></section>
+        <section id="tab-import" class="tab"></section>
+        <section id="tab-settings" class="tab"></section>
+      </main>
+    </div>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

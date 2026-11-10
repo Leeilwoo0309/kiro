@@ -1,0 +1,18 @@
+# 실제 개인 거래 데이터 (R1). 업로드 원본, 변환 CSV, SQLite 모두 여기에만 둔다.
+data/
+*.sqlite3
+*.db
+
+# 비밀값 (R11)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# macOS
+.DS_Store
