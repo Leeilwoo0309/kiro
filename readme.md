@@ -262,6 +262,10 @@ node --check app/static/app.js
 | **팀장** | **김종민**|
 | **프로젝트** | **텅장감사** |
 
+## License
+
+이 프로젝트는 [MIT License](LICENSE)를 따릅니다. 포함된 Tabler Icons의 저작권 및 라이선스 고지는 별도로 유지합니다.
+
 ### Open Source Notice
 
 [Tabler Icons v3.34.1](https://github.com/tabler/tabler-icons/tree/v3.34.1)의 SVG 아이콘 일부를 로컬에 포함했습니다. 아이콘은 **MIT License**를 따르며, [아이콘 라이선스 파일](app/static/icons/LICENSE)에서 확인할 수 있습니다.
